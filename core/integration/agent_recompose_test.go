@@ -128,7 +128,9 @@ func (LLMSuite) TestRecomposePrivateStateAndReplay(ctx context.Context, t *testc
 	require.Equal(t, 2, strings.Count(transcript, "private counter: 1"))
 	require.Len(t, mapPattern.FindAllString(transcript, -1), 2)
 
-	ws = fixture.WithNewFile(recomposeModulePath, updated).AsWorkspace()
+	// Edit the existing workspace overlay, as the editor does: rebuilding a
+	// Directory-backed workspace would give the module a different origin.
+	ws = ws.WithNewFile(recomposeModulePath, updated)
 	llm, err = recomposeLLM(ctx, c, ws, llm)
 	require.NoError(t, err)
 	tools, err := llm.Tools(ctx)
@@ -164,7 +166,7 @@ func (LLMSuite) TestRecomposePrivateStateAndReplay(ctx context.Context, t *testc
 
 	// Adding a middleware is the install path: initialize only the new module,
 	// not the existing module's counter/map or its previously added field.
-	installed := recomposeFixture(target, updated).
+	installed := llm.Workspace().
 		WithNewFile("dagger.toml", "[modules.swapper]\nsource = \".dagger/modules/swapper\"\n[modules.extra]\nsource = \"modules/extra\"\n").
 		WithNewFile("modules/extra/dagger.json", `{"name":"extra","engineVersion":"v1.0.0-0","sdk":"dang"}`).
 		WithNewFile("modules/extra/main.dang", `
@@ -173,7 +175,7 @@ type Extra {
   agent(base: LLM!): LLM! @agent { base.withTools(currentNode) }
   extraTool: String! { marker }
 }
-`).AsWorkspace()
+`)
 	llm, err = recomposeLLM(ctx, target, installed, llm)
 	require.NoError(t, err)
 	transcript, err = llm.WithPrompt("installed").Loop().Transcript(ctx)
@@ -203,7 +205,7 @@ func (LLMSuite) TestRecomposeFailureKeepsOldState(ctx context.Context, t *testct
 				WithPrompt("mutate").Loop()
 			_, err := llm.Sync(ctx)
 			require.NoError(t, err)
-			_, err = recomposeLLM(ctx, c, fixture.WithNewFile(recomposeModulePath, tc.source).AsWorkspace(), llm)
+			_, err = recomposeLLM(ctx, c, ws.WithNewFile(recomposeModulePath, tc.source), llm)
 			require.Error(t, err, "reload must not silently reset incompatible state")
 			if tc.name == "incompatible private map" {
 				require.Contains(t, err.Error(), "notes")
@@ -304,7 +306,7 @@ func (LLMSuite) TestRecomposeLivePrivateRoster(ctx context.Context, t *testctx.T
 	handlePattern := regexp.MustCompile(`worker handle: ([a-zA-Z0-9_-]+)`)
 	beforeHandles := handlePattern.FindAllStringSubmatch(before, -1)
 	require.Len(t, beforeHandles, 1)
-	llm, err = recomposeLLM(ctx, c, fixture.WithNewFile(recomposeModulePath, updated).AsWorkspace(), llm)
+	llm, err = recomposeLLM(ctx, c, ws.WithNewFile(recomposeModulePath, updated), llm)
 	require.NoError(t, err)
 	after, err := llm.WithPrompt("use roster").Loop().Transcript(ctx)
 	require.NoError(t, err)
@@ -385,8 +387,8 @@ type Other {
 	updated = strings.ReplaceAll(updated, "Read the original private state.", "Read the selected owner's updated state.")
 	changedOther := strings.ReplaceAll(strings.ReplaceAll(otherSource,
 		"The unrelated middleware prompt.", "Unselected edit must not be applied."), "oldOtherTool", "newOtherTool")
-	ws = fixture.WithNewFile(recomposeModulePath, updated).
-		WithNewFile("modules/other/main.dang", changedOther).AsWorkspace()
+	ws = ws.WithNewFile(recomposeModulePath, updated).
+		WithNewFile("modules/other/main.dang", changedOther)
 	llm, err = recomposeLLM(ctx, c, ws, llm, "swapper")
 	require.NoError(t, err)
 	expected := []string{shared, replacement, callerTail, "The unrelated middleware prompt."}
@@ -442,7 +444,7 @@ func (LLMSuite) TestRecomposePreservesManualContributions(ctx context.Context, t
 	require.ElementsMatch(t, []string{prompt, prompt, prompt}, recomposeSystemPrompts(ctx, t, c, composed))
 
 	const replacement = "Replacement owned prompt, never the caller's."
-	ws = fixture.WithNewFile(recomposeModulePath, strings.ReplaceAll(source, prompt, replacement)).AsWorkspace()
+	ws = ws.WithNewFile(recomposeModulePath, strings.ReplaceAll(source, prompt, replacement))
 	for _, seed := range []*dagger.LLM{manual, composed} {
 		// The legacy/manual seed has no ownership metadata to infer. Preserve
 		// its prompt and capability while installing the new owned middleware.
