@@ -32,6 +32,16 @@ func (s llmSchema) Install(srv *dagql.Server) {
 			),
 	}.Install(srv)
 	dagql.Fields[*core.LLM]{
+		dagql.Func("__withCompositionOwner", func(_ context.Context, llm *core.LLM, args struct {
+			Owner string
+		}) (*core.LLM, error) {
+			return llm.WithCompositionOwner(args.Owner), nil
+		}).View(AfterVersion("v1.0.0-0")),
+		dagql.Func("__withoutComposition", func(_ context.Context, llm *core.LLM, args struct {
+			Owner string
+		}) (*core.LLM, error) {
+			return llm.WithoutComposition(args.Owner), nil
+		}).View(AfterVersion("v1.0.0-0")),
 		dagql.Func("model", s.model).
 			Doc("The model the conversation is running against, after resolving any configured default."),
 		dagql.Func("provider", s.provider).
@@ -406,7 +416,11 @@ func (s *llmSchema) withPrompt(ctx context.Context, llm *core.LLM, args struct {
 
 func (s *llmSchema) withSystemPrompt(ctx context.Context, llm *core.LLM, args struct {
 	Prompt string
+	Owner  dagql.Optional[dagql.String] `internal:"true"`
 }) (*core.LLM, error) {
+	if args.Owner.Valid {
+		return llm.WithSystemPromptOwner(args.Prompt, string(args.Owner.Value)), nil
+	}
 	return llm.WithSystemPrompt(args.Prompt), nil
 }
 
@@ -441,8 +455,13 @@ func (s *llmSchema) withToolResult(ctx context.Context, llm *core.LLM, args stru
 
 func (s *llmSchema) withTools(ctx context.Context, llm *core.LLM, args struct {
 	Object dagql.AnyID
-	Except []string `default:"[]"`
+	Except []string                     `default:"[]"`
+	Owner  dagql.Optional[dagql.String] `internal:"true"`
 }) (*core.LLM, error) {
+	owner := llm.CompositionOwner()
+	if args.Owner.Valid {
+		owner = string(args.Owner.Value)
+	}
 	srv, err := core.CurrentDagqlServer(ctx)
 	if err != nil {
 		return nil, err
@@ -464,7 +483,7 @@ func (s *llmSchema) withTools(ctx context.Context, llm *core.LLM, args struct {
 			return nil, err
 		}
 		if ok {
-			return llm.WithLazyTools(id, objType, definingServer.Schema(), args.Except), nil
+			return llm.WithLazyToolsOwner(id, objType, definingServer.Schema(), args.Except, owner), nil
 		}
 	}
 	// Fall back to eager loading if the type isn't resolvable structurally. This
@@ -494,7 +513,7 @@ func (s *llmSchema) withTools(ctx context.Context, llm *core.LLM, args struct {
 	if err != nil {
 		return nil, fmt.Errorf("bind object to its defining type: %w", err)
 	}
-	return llm.WithTools(obj, definingServer.Schema(), args.Except), nil
+	return llm.WithToolsOwner(obj, definingServer.Schema(), args.Except, owner), nil
 }
 
 func (s *llmSchema) withoutDefaultSystemPrompt(ctx context.Context, llm *core.LLM, args struct{}) (*core.LLM, error) {

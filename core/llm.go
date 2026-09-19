@@ -92,6 +92,10 @@ type LLM struct {
 	// a `field:"true"` tag, since struct tag fields cannot carry a view filter.
 	Messages []*LLMMessage
 
+	// compositionOwner scopes future system prompts and object tool bindings.
+	// It is explicit LLM state (and part of recipes), not ambient Go context.
+	compositionOwner string
+
 	// The environment accessible to the LLM, exposed over MCP
 	mcp *MCP
 
@@ -564,6 +568,11 @@ type LLMMessage struct {
 	// Exposed through an explicit nullable accessor rather than field:"true",
 	// since absent is the common case.
 	Origin *LLMMessageOrigin `json:"origin,omitempty"`
+
+	// CompositionOwner identifies the composition that installed a system
+	// prompt. Empty means caller-owned/unowned. This is independent of mailbox
+	// Origin and is never sent to a model as prompt text or attribution.
+	CompositionOwner string `json:"composition_owner,omitempty"`
 }
 
 func (*LLMMessage) TypeDescription() string {
@@ -1779,11 +1788,49 @@ func (llm *LLM) WithoutSystemPrompts() *LLM {
 	return llm
 }
 
-// Append a system prompt message to the history
+// CompositionOwner identifies the scope that owns subsequently installed
+// system prompts and object tool bindings. Empty means caller-owned/unowned.
+func (llm *LLM) CompositionOwner() string {
+	return llm.compositionOwner
+}
+
+// WithCompositionOwner sets an explicit scope without changing existing state.
+// Nested compositions restore their caller's owner when they finish.
+func (llm *LLM) WithCompositionOwner(owner string) *LLM {
+	llm = llm.Clone()
+	llm.compositionOwner = owner
+	return llm
+}
+
+// WithoutComposition removes only system prompts and object tool bindings
+// installed by owner. Unowned state is never removed, even for an empty owner.
+// Conversation history, other owners, skills and other configuration survive.
+func (llm *LLM) WithoutComposition(owner string) *LLM {
+	llm = llm.Clone()
+	if owner == "" {
+		return llm
+	}
+	llm.Messages = slices.DeleteFunc(llm.Messages, func(msg *LLMMessage) bool {
+		return msg.Role == LLMMessageRoleSystem && msg.CompositionOwner == owner
+	})
+	llm.mcp.boundTools = slices.DeleteFunc(llm.mcp.boundTools, func(binding boundTool) bool {
+		return binding.Owner == owner
+	})
+	return llm
+}
+
+// Append a system prompt message to the history, owned by the active scope.
 func (llm *LLM) WithSystemPrompt(prompt string) *LLM {
+	return llm.WithSystemPromptOwner(prompt, llm.compositionOwner)
+}
+
+// WithSystemPromptOwner records an explicit owner without changing the active
+// composition scope. Recipe replay uses this to preserve even an empty owner.
+func (llm *LLM) WithSystemPromptOwner(prompt, owner string) *LLM {
 	llm = llm.Clone()
 	llm.Messages = append(llm.Messages, &LLMMessage{
-		Role: LLMMessageRoleSystem,
+		Role:             LLMMessageRoleSystem,
+		CompositionOwner: owner,
 		Content: []*LLMContentBlock{{
 			Kind: LLMContentText,
 			Text: prompt,
@@ -1824,8 +1871,14 @@ func (llm *LLM) WithToolResult(callID, content string, errored bool) *LLM {
 // own type rebinds it as the new agent state; except lists method names to exclude
 // (e.g. the module's own entrypoint).
 func (llm *LLM) WithTools(obj dagql.AnyObjectResult, definingSchema *ast.Schema, except []string) *LLM {
+	return llm.WithToolsOwner(obj, definingSchema, except, llm.compositionOwner)
+}
+
+// WithToolsOwner binds tools with an explicit owner, leaving the active scope
+// unchanged. It is used when replaying a recorded binding or state transition.
+func (llm *LLM) WithToolsOwner(obj dagql.AnyObjectResult, definingSchema *ast.Schema, except []string, owner string) *LLM {
 	llm = llm.Clone()
-	llm.mcp = llm.mcp.WithTools(obj, definingSchema, except)
+	llm.mcp = llm.mcp.withToolsOwner(obj, definingSchema, except, owner)
 	return llm
 }
 
@@ -1833,8 +1886,13 @@ func (llm *LLM) WithTools(obj dagql.AnyObjectResult, definingSchema *ast.Schema,
 // preserving the schema that defined its type without loading the object.
 // See MCP.WithLazyTools.
 func (llm *LLM) WithLazyTools(id *call.ID, objType dagql.ObjectType, definingSchema *ast.Schema, except []string) *LLM {
+	return llm.WithLazyToolsOwner(id, objType, definingSchema, except, llm.compositionOwner)
+}
+
+// WithLazyToolsOwner is the lazy counterpart of WithToolsOwner.
+func (llm *LLM) WithLazyToolsOwner(id *call.ID, objType dagql.ObjectType, definingSchema *ast.Schema, except []string, owner string) *LLM {
 	llm = llm.Clone()
-	llm.mcp = llm.mcp.WithLazyTools(id, objType, definingSchema, except)
+	llm.mcp = llm.mcp.withLazyToolsOwner(id, objType, definingSchema, except, owner)
 	return llm
 }
 
@@ -2247,7 +2305,8 @@ func stateDeltaSelectors(m *MCP, wsBefore *call.ID, toolsBefore []boundToolBindi
 	if toolsAfter, err := m.BoundToolBindings(); err == nil {
 		for i, after := range toolsAfter {
 			if i < len(toolsBefore) &&
-				stableIDDigest(after.ID) == stableIDDigest(toolsBefore[i].ID) {
+				stableIDDigest(after.ID) == stableIDDigest(toolsBefore[i].ID) &&
+				after.Owner == toolsBefore[i].Owner && slices.Equal(after.Except, toolsBefore[i].Except) {
 				continue
 			}
 			sels = append(sels, dagql.Selector{
@@ -2261,6 +2320,7 @@ func stateDeltaSelectors(m *MCP, wsBefore *call.ID, toolsBefore []boundToolBindi
 						Name:  "except",
 						Value: dagql.ArrayInput[dagql.String](dagql.NewStringArray(after.Except...)),
 					},
+					{Name: "owner", Value: dagql.Opt(dagql.String(after.Owner))},
 				},
 			})
 		}
@@ -3015,6 +3075,7 @@ func (llm *LLM) recipeSelectors(ctx context.Context) ([]dagql.Selector, error) {
 			Args: []dagql.NamedInput{
 				{Name: "object", Value: dagql.NewAnyID(b.ID)},
 				{Name: "except", Value: dagql.ArrayInput[dagql.String](dagql.NewStringArray(b.Except...))},
+				{Name: "owner", Value: dagql.Opt(dagql.String(b.Owner))},
 			},
 		})
 	}
@@ -3052,6 +3113,7 @@ func (llm *LLM) recipeSelectors(ctx context.Context) ([]dagql.Selector, error) {
 				Field: "withSystemPrompt",
 				Args: []dagql.NamedInput{
 					{Name: "prompt", Value: dagql.NewString(msg.TextContent())},
+					{Name: "owner", Value: dagql.Opt(dagql.String(msg.CompositionOwner))},
 				},
 			})
 		case LLMMessageRoleAssistant:
@@ -3105,6 +3167,12 @@ func (llm *LLM) recipeSelectors(ctx context.Context) ([]dagql.Selector, error) {
 		}
 	}
 
+	if llm.compositionOwner != "" {
+		sels = append(sels, dagql.Selector{
+			Field: "__withCompositionOwner",
+			Args:  []dagql.NamedInput{{Name: "owner", Value: dagql.String(llm.compositionOwner)}},
+		})
+	}
 	return sels, nil
 }
 
