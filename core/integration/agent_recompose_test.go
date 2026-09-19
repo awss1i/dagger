@@ -156,7 +156,7 @@ func (LLMSuite) TestRecomposePrivateStateAndReplay(ctx context.Context, t *testc
 	portable, err := llm.PortableID(ctx)
 	require.NoError(t, err)
 	target := connect(ctx, t)
-	llm = dagger.Ref[*dagger.LLM](target, dagger.ID(portable)).WithPrompt("restored").Loop()
+	llm = dagger.Ref[*dagger.LLM](target, portable).WithPrompt("restored").Loop()
 	transcript, err = llm.Transcript(ctx)
 	require.NoError(t, err)
 	require.Contains(t, transcript, "new field default; updated counter: 3")
@@ -409,7 +409,7 @@ type Other {
 	portable, err := llm.PortableID(ctx)
 	require.NoError(t, err)
 	target := connect(ctx, t)
-	llm = dagger.Ref[*dagger.LLM](target, dagger.ID(portable))
+	llm = dagger.Ref[*dagger.LLM](target, portable)
 	require.ElementsMatch(t, expected, recomposeSystemPrompts(ctx, t, target, llm))
 	for range 2 {
 		llm, err = recomposeLLM(ctx, target, llm.Workspace(), llm, "swapper")
