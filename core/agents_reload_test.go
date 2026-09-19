@@ -46,6 +46,14 @@ func TestToolStateOrigin(t *testing.T) {
 		next := makeObject(&ModuleSource{Kind: ModuleSourceKindLocal, SourceRootSubpath: "staff", Local: &LocalModuleSource{ContextDirectoryPath: "/two"}}, "staff", "Staff")
 		require.ErrorContains(t, sameToolStateOrigin(t.Context(), old, next), "module source changed")
 	})
+	t.Run("local served and overlay sources share an origin", func(t *testing.T) {
+		dag.InstallObject(dagql.NewClass[*Workspace](dag))
+		ws := newTypeDefDetachedResult(t, dag, "reload-workspace", &Workspace{Address: "file:///one", selectedEnv: "dev"})
+		oldSource := &ModuleSource{Kind: ModuleSourceKindLocal, SourceRootSubpath: "staff", Local: &LocalModuleSource{ContextDirectoryPath: "/one"}}
+		newSource := oldSource.Clone()
+		newSource.Workspace = ws
+		require.NoError(t, sameToolStateOrigin(t.Context(), makeObject(oldSource, "staff", "Staff"), makeObject(newSource, "staff", "Staff")))
+	})
 	t.Run("unknown origin is refused", func(t *testing.T) {
 		next := makeObject(&ModuleSource{Kind: ModuleSourceKindDir}, "staff", "Staff")
 		require.ErrorContains(t, sameToolStateOrigin(t.Context(), original, next), "no stable source identity")

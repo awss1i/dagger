@@ -209,11 +209,14 @@ func toolStateModuleOrigin(ctx context.Context, mod *Module) (string, error) {
 	if src.Kind == ModuleSourceKindGit && src.Git != nil {
 		return "git:" + GitRefString(src.Git.CloneRef, src.SourceRootSubpath, ""), nil
 	}
-	if ws := src.Workspace.Self(); ws != nil {
-		return fmt.Sprintf("workspace:%s:%s:%s", ws.Address, ws.selectedEnv, src.SourceRootSubpath), nil
-	}
+	// Native local sources use the same origin whether loaded by the session's
+	// module registry or through a Workspace overlay. The former need not carry
+	// a Workspace value at all.
 	if src.Kind == ModuleSourceKindLocal && src.Local != nil {
 		return "local:" + filepath.Join(src.Local.ContextDirectoryPath, src.SourceRootSubpath), nil
+	}
+	if ws := src.Workspace.Self(); ws != nil {
+		return fmt.Sprintf("workspace:%s:%s:%s", ws.Address, ws.selectedEnv, src.SourceRootSubpath), nil
 	}
 	if src.Kind == ModuleSourceKindDir && src.DirSrc != nil && src.DirSrc.OriginalContextDir.Self() != nil {
 		id, err := src.DirSrc.OriginalContextDir.RecipeDigest(ctx)
