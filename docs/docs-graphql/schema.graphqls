@@ -414,6 +414,25 @@ type AgentMiddlewareGroup implements Node {
 
   """Return a list of individual agents and their details"""
   list: [AgentMiddleware!]! @experimental(reason: "Agent APIs are likely to change.")
+
+  """
+  Recompose the selected agent middlewares onto an existing LLM, replacing their
+  owned system prompts and tool bindings while preserving tool object state.
+
+  Caller-added prompts and unrelated middleware contributions are retained.
+  Prompts from older conversations without ownership metadata are never removed
+  automatically. Other middleware effects retain compose semantics; this is not
+  a general rollback of arbitrary middleware changes.
+
+  Existing field values win over new defaults. Incompatible state, discarded
+  bindings, or a changed module origin is an error. Cross-revision state
+  validation currently requires the Dang v2 runtime; unchanged module revisions
+  work with any SDK. The base workspace is preserved.
+  """
+  recompose(
+    """The existing conversation whose tool state should be preserved."""
+    base: ID! @expectedType(name: "LLM")
+  ): LLM! @experimental(reason: "Agent APIs are likely to change.")
 }
 
 """

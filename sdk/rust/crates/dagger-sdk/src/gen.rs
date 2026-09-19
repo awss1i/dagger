@@ -1137,6 +1137,28 @@ impl AgentMiddlewareGroup {
             })
             .collect())
     }
+    /// Recompose the selected agent middlewares onto an existing LLM, replacing their owned system prompts and tool bindings while preserving tool object state.
+    /// Caller-added prompts and unrelated middleware contributions are retained. Prompts from older conversations without ownership metadata are never removed automatically. Other middleware effects retain compose semantics; this is not a general rollback of arbitrary middleware changes.
+    /// Existing field values win over new defaults. Incompatible state, discarded bindings, or a changed module origin is an error. Cross-revision state validation currently requires the Dang v2 runtime; unchanged module revisions work with any SDK. The base workspace is preserved.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The existing conversation whose tool state should be preserved.
+    pub fn recompose(&self, base: impl IntoID<Id>) -> Llm {
+        let mut query = self.selection.select("recompose");
+        query = query.arg_lazy(
+            "base",
+            Box::new(move || {
+                let base = base.clone();
+                Box::pin(async move { base.into_id().await.unwrap().quote() })
+            }),
+        );
+        Llm {
+            proc: self.proc.clone(),
+            selection: query,
+            graphql_client: self.graphql_client.clone(),
+        }
+    }
 }
 impl Node for AgentMiddlewareGroup {
     fn id(&self) -> impl core::future::Future<Output = Result<Id, DaggerError>> + Send {

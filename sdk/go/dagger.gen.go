@@ -1158,6 +1158,23 @@ func (r *AgentMiddlewareGroup) List(ctx context.Context) ([]AgentMiddleware, err
 	return convert(response), nil
 }
 
+// Recompose the selected agent middlewares onto an existing LLM, replacing their owned system prompts and tool bindings while preserving tool object state.
+//
+// Caller-added prompts and unrelated middleware contributions are retained. Prompts from older conversations without ownership metadata are never removed automatically. Other middleware effects retain compose semantics; this is not a general rollback of arbitrary middleware changes.
+//
+// Existing field values win over new defaults. Incompatible state, discarded bindings, or a changed module origin is an error. Cross-revision state validation currently requires the Dang v2 runtime; unchanged module revisions work with any SDK. The base workspace is preserved.
+//
+// Experimental: Agent APIs are likely to change.
+func (r *AgentMiddlewareGroup) Recompose(base *LLM) *LLM {
+	assertNotNil("base", base)
+	q := r.query.Select("recompose")
+	q = q.Arg("base", base)
+
+	return &LLM{
+		query: q,
+	}
+}
+
 // AsNode returns this AgentMiddlewareGroup as a Node.
 // This is a local type conversion — no GraphQL call.
 func (r *AgentMiddlewareGroup) AsNode() Node {

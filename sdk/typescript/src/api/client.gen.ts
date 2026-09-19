@@ -4805,6 +4805,20 @@ export class AgentMiddlewareGroup extends BaseClient {
         new AgentMiddleware(ctx.copy().selectNode(r.id, "AgentMiddleware")),
     )
   }
+
+  /**
+   * Recompose the selected agent middlewares onto an existing LLM, replacing their owned system prompts and tool bindings while preserving tool object state.
+   *
+   * Caller-added prompts and unrelated middleware contributions are retained. Prompts from older conversations without ownership metadata are never removed automatically. Other middleware effects retain compose semantics; this is not a general rollback of arbitrary middleware changes.
+   *
+   * Existing field values win over new defaults. Incompatible state, discarded bindings, or a changed module origin is an error. Cross-revision state validation currently requires the Dang v2 runtime; unchanged module revisions work with any SDK. The base workspace is preserved.
+   * @param base The existing conversation whose tool state should be preserved.
+   * @experimental
+   */
+  recompose = (base: LLM): LLM => {
+    const ctx = this._ctx.select("recompose", { base })
+    return new LLM(ctx)
+  }
 }
 
 /**

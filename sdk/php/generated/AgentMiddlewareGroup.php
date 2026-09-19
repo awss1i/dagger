@@ -44,4 +44,18 @@ class AgentMiddlewareGroup extends Client\AbstractObject implements Client\IdAbl
         $leafQueryBuilder = new \Dagger\Client\QueryBuilder('list');
         return (array)$this->queryLeaf($leafQueryBuilder, 'list');
     }
+
+    /**
+     * Recompose the selected agent middlewares onto an existing LLM, replacing their owned system prompts and tool bindings while preserving tool object state.
+     *
+     * Caller-added prompts and unrelated middleware contributions are retained. Prompts from older conversations without ownership metadata are never removed automatically. Other middleware effects retain compose semantics; this is not a general rollback of arbitrary middleware changes.
+     *
+     * Existing field values win over new defaults. Incompatible state, discarded bindings, or a changed module origin is an error. Cross-revision state validation currently requires the Dang v2 runtime; unchanged module revisions work with any SDK. The base workspace is preserved.
+     */
+    public function recompose(LLM $base): LLM
+    {
+        $innerQueryBuilder = new \Dagger\Client\QueryBuilder('recompose');
+        $innerQueryBuilder->setArgument('base', $base);
+        return new \Dagger\LLM($this->client, $this->queryBuilderChain->chain($innerQueryBuilder));
+    }
 }
