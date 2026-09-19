@@ -35,7 +35,7 @@ func RebindModuleObjectState(ctx context.Context, srv *dagql.Server, initial, pr
 	if err != nil {
 		return nil, err
 	}
-	same, err := NewUserMod(target.Module).Same(NewUserMod(old.Module))
+	same, err := sameModuleImplementation(ctx, target.Module, old.Module)
 	if err != nil {
 		return nil, err
 	}
@@ -46,14 +46,54 @@ func RebindModuleObjectState(ctx context.Context, srv *dagql.Server, initial, pr
 	if err != nil {
 		return nil, fmt.Errorf("previous receiver ID: %w", err)
 	}
+	// Select dispatches through the server's class registry, not just the
+	// receiver wrapper. Resolve the target recipe's defining server so a caller
+	// still serving the old revision cannot run its rebind field instead.
+	targetID, err := initial.RecipeID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("target receiver recipe: %w", err)
+	}
+	targetClass, targetServer, found, err := srv.ObjectTypeAndServerForID(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("target receiver class is unavailable")
+	}
+	initial, err = targetClass.New(initial)
+	if err != nil {
+		return nil, fmt.Errorf("bind target receiver class: %w", err)
+	}
 	var result dagql.AnyObjectResult
-	if err := srv.Select(ctx, initial, &result, dagql.Selector{
+	if err := targetServer.Select(ctx, initial, &result, dagql.Selector{
 		Field: rebindModuleObjectStateField,
 		Args:  []dagql.NamedInput{{Name: "previous", Value: dagql.NewAnyID(previousID)}},
 	}); err != nil {
 		return nil, fmt.Errorf("rebind %s state: %w", target.TypeDef.OriginalName, err)
 	}
 	return result, nil
+}
+
+// Equivalent implementation-scoped modules may still have distinct cache result
+// handles. Compare their canonical content identities, including module variants.
+func sameModuleImplementation(ctx context.Context, left, right dagql.ObjectResult[*Module]) (bool, error) {
+	leftScoped, err := ImplementationScopedModule(ctx, left)
+	if err != nil {
+		return false, err
+	}
+	rightScoped, err := ImplementationScopedModule(ctx, right)
+	if err != nil {
+		return false, err
+	}
+	leftDigest, err := leftScoped.ContentPreferredDigest(ctx)
+	if err != nil {
+		return false, err
+	}
+	rightDigest, err := rightScoped.ContentPreferredDigest(ctx)
+	if err != nil {
+		return false, err
+	}
+	return leftDigest == rightDigest, nil
 }
 
 func moduleObjectsForRebind(initial, previous dagql.AnyObjectResult) (*ModuleObject, *ModuleObject, error) {
@@ -104,7 +144,10 @@ func (obj *ModuleObject) stateRebindField(ctx context.Context, srv *dagql.Server
 			if err != nil {
 				return nil, err
 			}
-			sameClass, err := NewUserMod(target.Module).Same(NewUserMod(obj.Module))
+			// Recipe provenance installs an implementation-scoped module, while
+			// the receiver may retain its original workspace-bound module. Compare
+			// the canonical implementation identities rather than raw handles.
+			sameClass, err := sameModuleImplementation(ctx, target.Module, obj.Module)
 			if err != nil {
 				return nil, err
 			}

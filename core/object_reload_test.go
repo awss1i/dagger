@@ -6,8 +6,53 @@ import (
 
 	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/engine"
+	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
 )
+
+func TestModuleObjectStateImplementationIdentity(t *testing.T) {
+	ctx := t.Context()
+	cache, err := dagql.NewCache(ctx, "", nil, nil)
+	require.NoError(t, err)
+	root := &Query{}
+	server := &moduleObjectTestServer{mockServer: &mockServer{}, cache: cache, root: root}
+	root.Server = server
+	dag := newCoreDagqlServerForTest(t, root)
+	server.dag = dag
+	ctx = dagql.ContextWithCache(ContextWithQuery(ctx, root), cache)
+	ctx = engine.ContextWithClientMetadata(ctx, &engine.ClientMetadata{ClientID: "identity-client", SessionID: "identity-session"})
+	installModuleObjectTestModuleClass(dag)
+	// Model the production implementation scope: different recipe handles can
+	// carry the same implementation content identity.
+	dagql.Fields[*Module]{
+		dagql.NodeFunc("_implementationScoped", func(ctx context.Context, self dagql.ObjectResult[*Module], _ struct{}) (dagql.ObjectResult[*Module], error) {
+			res, err := dagql.NewObjectResultForCurrentCall(ctx, dag, self.Self().Clone())
+			if err != nil {
+				return res, err
+			}
+			return res.WithContentDigest(ctx, digest.FromString(self.Self().Description))
+		}),
+	}.Install(dag)
+	makeModule := func(recipe, implementation string) dagql.ObjectResult[*Module] {
+		return newTypeDefAttachedResult(t, ctx, cache, dag, recipe, &Module{
+			NameField: "Test", OriginalName: "Test", Description: implementation,
+		})
+	}
+	original := makeModule("original-scope", "revision-one")
+	alias := makeModule("another-scope", "revision-one")
+	changed := makeModule("changed-scope", "revision-two")
+	originalID, err := original.ID()
+	require.NoError(t, err)
+	aliasID, err := alias.ID()
+	require.NoError(t, err)
+	require.NotEqual(t, originalID.EngineResultID(), aliasID.EngineResultID())
+	same, err := sameModuleImplementation(ctx, original, alias)
+	require.NoError(t, err)
+	require.True(t, same)
+	same, err = sameModuleImplementation(ctx, original, changed)
+	require.NoError(t, err)
+	require.False(t, same)
+}
 
 func TestModuleObjectStateMerge(t *testing.T) {
 	oldSchema := map[string]string{"null": "String?", "empty": "[String!]!", "private": "String!", "ref": "Container!"}
