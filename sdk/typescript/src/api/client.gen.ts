@@ -4752,7 +4752,7 @@ export class Artifact extends BaseClient {
   }
 
   /**
-   * One key per dimension along the path. Unordered; empty for static artifacts.
+   * The selected keys for each dimension. Empty for static artifacts.
    */
   dimensionKeys = async (): Promise<ArtifactDimensionKey[]> => {
     type dimensionKeys = {

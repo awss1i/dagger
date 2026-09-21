@@ -417,9 +417,7 @@ type Artifact implements Node {
   """The description of the field that supplies this artifact."""
   description: String!
 
-  """
-  One key per dimension along the path. Unordered; empty for static artifacts.
-  """
+  """The selected keys for each dimension. Empty for static artifacts."""
   dimensionKeys: [ArtifactDimensionKey!]!
 
   """The directives carried by this artifact."""

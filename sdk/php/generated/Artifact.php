@@ -32,7 +32,7 @@ class Artifact extends Client\AbstractObject implements Client\IdAble, Node
     }
 
     /**
-     * One key per dimension along the path. Unordered; empty for static artifacts.
+     * The selected keys for each dimension. Empty for static artifacts.
      */
     public function dimensionKeys(): array
     {

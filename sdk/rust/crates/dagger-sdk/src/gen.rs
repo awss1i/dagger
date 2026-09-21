@@ -1057,7 +1057,7 @@ impl Artifact {
         let query = self.selection.select("description");
         query.execute(self.graphql_client.clone()).await
     }
-    /// One key per dimension along the path. Unordered; empty for static artifacts.
+    /// The selected keys for each dimension. Empty for static artifacts.
     pub async fn dimension_keys(&self) -> Result<Vec<ArtifactDimensionKey>, DaggerError> {
         let query = self.selection.select("dimensionKeys");
         let query = query.select("id");
