@@ -1162,7 +1162,7 @@ func (r *AgentMiddlewareGroup) List(ctx context.Context) ([]AgentMiddleware, err
 //
 // Caller-added prompts and unrelated middleware contributions are retained. Prompts from older conversations without ownership metadata are never removed automatically. Other middleware effects retain compose semantics; this is not a general rollback of arbitrary middleware changes.
 //
-// Existing field values win over new defaults. Incompatible state, discarded bindings, or a changed module origin is an error. Cross-revision state validation currently requires the Dang v2 runtime; unchanged module revisions work with any SDK. The base workspace is preserved.
+// Existing field values win over new defaults; fields added by the new revision take its defaults. An object may declare a public `stateVersion: Int` field with a constant default: recomposing onto a revision whose version differs resets that object's state to the new defaults instead. Visibly incompatible state (a public field that changed type, or a value whose shape differs from the new default), discarded bindings, or a changed module origin is an error. The base workspace is preserved.
 //
 // Experimental: Agent APIs are likely to change.
 func (r *AgentMiddlewareGroup) Recompose(base *LLM) *LLM {

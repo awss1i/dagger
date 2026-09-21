@@ -519,6 +519,11 @@ func objectToolEligible(field *ast.FieldDefinition, except []string, implicit im
 	if field.Name == "id" || field.Name == "sync" {
 		return false
 	}
+	// The state version is a constant the engine reads when recomposing
+	// (see StateVersionFieldName); it is never something the model acts on.
+	if field.Name == StateVersionFieldName {
+		return false
+	}
 	if field.Directives.ForName("deprecated") != nil {
 		return false
 	}

@@ -221,6 +221,172 @@ func (LLMSuite) TestRecomposeFailureKeepsOldState(ctx context.Context, t *testct
 	}
 }
 
+func (LLMSuite) TestRecomposeStateVersion(ctx context.Context, t *testctx.T) {
+	c := connect(ctx, t)
+	// The same private-map retype that TestRecomposeFailureKeepsOldState rejects,
+	// declared incompatible by the author via a state version. Recomposing then
+	// resets the object to the new revision's defaults instead of failing.
+	retyped := func(source string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(source,
+			`let notes: Map[String!]! = ["seed": "constructor"]`, `let notes: Map[Int!]! = ["seed": 42]`),
+			`notes.with("memo", "kept")`, `notes.with("memo", 99)`)
+	}
+	versioned := retyped(fmt.Sprintf(recomposeSource, `
+  stateVersion: Int! = 1
+`))
+	extended := retyped(fmt.Sprintf(recomposeSource, `
+  stateVersion: Int! = 1
+
+  added: String! { "added; counter: " + toString(state) }
+`))
+	fixture := recomposeFixture(c, fmt.Sprintf(recomposeSource, ""))
+	ws := fixture.AsWorkspace()
+	script := recomposeRecordingTurn(c.LLM(), "mutate", "advance", "readState")
+	script = recomposeRecordingTurn(script, "reset", "readState", "advance")
+	script = recomposeRecordingTurn(script, "carried", "added", "readState")
+	model := cannedRecordingModel(ctx, t, c, script)
+	llm := ws.Agents().Compose(dagger.AgentMiddlewareGroupComposeOpts{Base: c.LLM(dagger.LLMOpts{Model: model}).WithWorkspace(ws)}).
+		WithPrompt("mutate").Loop()
+	transcript, err := llm.Transcript(ctx)
+	require.NoError(t, err)
+	require.Contains(t, transcript, "private counter: 1")
+	require.Regexp(t, `"memo"\s*:\s*"kept"`, transcript)
+
+	// Declaring a version for the first time is itself a bump: the old state
+	// (version 0) is discarded rather than overlaid onto the retyped map.
+	ws = ws.WithNewFile(recomposeModulePath, versioned)
+	llm, err = recomposeLLM(ctx, c, ws, llm)
+	require.NoError(t, err)
+	tools, err := llm.Tools(ctx)
+	require.NoError(t, err)
+	require.NotContains(t, tools, "## stateVersion\n", "the state version is not a tool")
+	llm = llm.WithPrompt("reset").Loop()
+	transcript, err = llm.Transcript(ctx)
+	require.NoError(t, err)
+	require.Contains(t, transcript, "private counter: 0")
+	require.Regexp(t, `"seed"\s*:\s*42`, transcript)
+	require.Len(t, regexp.MustCompile(`"memo"\s*:\s*"kept"`).FindAllString(transcript, -1), 1, "the old memo is gone after the reset")
+
+	// An edit at the same version carries the (now version 1) state over.
+	ws = ws.WithNewFile(recomposeModulePath, extended)
+	llm, err = recomposeLLM(ctx, c, ws, llm)
+	require.NoError(t, err)
+	transcript, err = llm.WithPrompt("carried").Loop().Transcript(ctx)
+	require.NoError(t, err)
+	require.Contains(t, transcript, "added; counter: 1")
+	require.Equal(t, 2, strings.Count(transcript, "private counter: 1"))
+	require.Regexp(t, `"memo"\s*:\s*99`, transcript)
+}
+
+const recomposeGoModulePath = ".dagger/modules/swapper/main.go"
+
+// The same shape as recomposeSource, in a container SDK. Nothing about state
+// transfer is SDK-specific: private fields are whatever the SDK serializes.
+const recomposeGoSource = `package main
+
+import (
+	"encoding/json"
+	"fmt"
+
+	"dagger/swapper/internal/dagger"
+)
+
+type Swapper struct {
+	// +private
+	State int
+	// +private
+	Notes []string
+%s
+}
+
+func New() *Swapper {
+	return &Swapper{Notes: []string{"seed=constructor"}%s}
+}
+
+// +agent
+func (s *Swapper) Agent(base *dagger.LLM) *dagger.LLM {
+	return base.WithTools(dag.CurrentNode())
+}
+
+func (s *Swapper) Advance() *Swapper {
+	s.State++
+	if s.State == 1 {
+		s.Notes = append(s.Notes, "memo=kept")
+	}
+	return s
+}
+
+// Read the private state.
+func (s *Swapper) ReadState() string {
+	notes, _ := json.Marshal(s.Notes)
+	return fmt.Sprintf("private counter: %%d; notes: %%s", s.State, notes)
+}
+%s
+`
+
+func recomposeGoFixture(c *dagger.Client, source string) *dagger.Directory {
+	return c.Directory().
+		WithNewFile("dagger.toml", "[modules.swapper]\nsource = \".dagger/modules/swapper\"\n").
+		WithNewFile(".dagger/modules/swapper/dagger.json", `{"name":"swapper","engineVersion":"v1.0.0-0","sdk":"go"}`).
+		WithNewFile(recomposeGoModulePath, source)
+}
+
+func (LLMSuite) TestRecomposeGoModuleState(ctx context.Context, t *testctx.T) {
+	c := connect(ctx, t)
+	initial := fmt.Sprintf(recomposeGoSource, "", "", "")
+	extended := fmt.Sprintf(recomposeGoSource, `
+	// +private
+	Label string`, `, Label: "new field default"`, `
+func (s *Swapper) Added() string {
+	return fmt.Sprintf("%s; updated counter: %d", s.Label, s.State)
+}
+`)
+	versioned := fmt.Sprintf(recomposeGoSource, `
+	// +private
+	Label string
+	StateVersion int`, `, Label: "new field default", StateVersion: 1`, `
+func (s *Swapper) Added() string {
+	return fmt.Sprintf("%s; updated counter: %d", s.Label, s.State)
+}
+`)
+	fixture := recomposeGoFixture(c, initial)
+	ws := fixture.AsWorkspace()
+	script := recomposeRecordingTurn(c.LLM(), "mutate", "advance", "readState")
+	script = recomposeRecordingTurn(script, "edited", "added", "advance", "readState")
+	script = recomposeRecordingTurn(script, "reset", "readState")
+	model := cannedRecordingModel(ctx, t, c, script)
+	llm := ws.Agents().Compose(dagger.AgentMiddlewareGroupComposeOpts{Base: c.LLM(dagger.LLMOpts{Model: model}).WithWorkspace(ws)}).
+		WithPrompt("mutate").Loop()
+	transcript, err := llm.Transcript(ctx)
+	require.NoError(t, err)
+	require.Contains(t, transcript, "private counter: 1")
+	require.Contains(t, transcript, "memo=kept")
+
+	// A new revision with an added private field and method: existing state
+	// carries over, the new field takes the new constructor's default.
+	ws = ws.WithNewFile(recomposeGoModulePath, extended)
+	llm, err = recomposeLLM(ctx, c, ws, llm)
+	require.NoError(t, err)
+	llm = llm.WithPrompt("edited").Loop()
+	transcript, err = llm.Transcript(ctx)
+	require.NoError(t, err)
+	require.Contains(t, transcript, "new field default; updated counter: 1")
+	require.Contains(t, transcript, "private counter: 2")
+	require.Equal(t, 2, strings.Count(transcript, "memo=kept"))
+
+	// Declaring a state version resets the object to the new defaults.
+	ws = ws.WithNewFile(recomposeGoModulePath, versioned)
+	llm, err = recomposeLLM(ctx, c, ws, llm)
+	require.NoError(t, err)
+	tools, err := llm.Tools(ctx)
+	require.NoError(t, err)
+	require.NotContains(t, tools, "## stateVersion\n")
+	transcript, err = llm.WithPrompt("reset").Loop().Transcript(ctx)
+	require.NoError(t, err)
+	require.Contains(t, transcript, "private counter: 0")
+	require.Equal(t, 2, strings.Count(transcript, "memo=kept"))
+}
+
 func (LLMSuite) TestRecomposeSameBatchStateReturn(ctx context.Context, t *testctx.T) {
 	c := connect(ctx, t)
 	const editSource = `

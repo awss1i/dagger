@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/dagger/dagger/dagql"
@@ -54,62 +55,242 @@ func TestModuleObjectStateImplementationIdentity(t *testing.T) {
 	require.False(t, same)
 }
 
-func TestModuleObjectStateMerge(t *testing.T) {
-	oldSchema := map[string]string{"null": "String?", "empty": "[String!]!", "private": "String!", "ref": "Container!"}
-	newSchema := map[string]string{"null": "String?", "empty": "[String!]!", "private": "String!", "ref": "Container!", "added": "Int!"}
-	ref := &Container{}
-	old := map[string]any{"null": nil, "empty": []any{}, "private": "saved", "ref": ref}
-	initial := map[string]any{"null": "default", "empty": []any{"default"}, "private": "default", "ref": &Container{}, "added": 42}
-	merged, err := mergeModuleObjectState(initial, old, newSchema, oldSchema)
-	require.NoError(t, err)
-	require.Nil(t, merged["null"])
-	require.Empty(t, merged["empty"])
-	require.Equal(t, "saved", merged["private"])
-	require.Same(t, ref, merged["ref"])
-	require.Equal(t, 42, merged["added"])
-	merged["private"] = "changed"
-	require.Equal(t, "saved", old["private"])
-	require.Equal(t, "default", initial["private"])
+func stateTestObjectDef(t *testing.T, dag *dagql.Server, name string, fields map[string]*TypeDef) *ObjectTypeDef {
+	t.Helper()
+	def := NewObjectTypeDef(name, "", nil)
+	for fieldName, typeDef := range fields {
+		typeRes := newTypeDefDetachedResult(t, dag, name+"."+fieldName+".type", typeDef)
+		def.Fields = append(def.Fields, newTypeDefDetachedResult(t, dag, name+"."+fieldName, NewFieldTypeDef(fieldName, typeRes, "", nil)))
+	}
+	return def
 }
 
-func TestModuleObjectStateMergeRejectsIncompatibleState(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		old, target map[string]string
-		state       map[string]any
-		want        string
+func TestModuleObjectStateOverlayKeepsExistingValues(t *testing.T) {
+	dag := newTypeDefTestDag(t)
+	source := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{
+		"count": {Kind: TypeDefKindInteger},
+		"label": {Kind: TypeDefKindString, Optional: true},
+	})
+	target := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{
+		"count": {Kind: TypeDefKindInteger},
+		"label": {Kind: TypeDefKindString, Optional: true},
+		"added": {Kind: TypeDefKindBoolean},
+	})
+	ref := &Container{}
+	previous := map[string]any{
+		"count":  json.Number("3"),
+		"label":  nil,
+		"tags":   []any{},
+		"secret": "saved",
+		"ref":    ref,
+	}
+	initial := map[string]any{
+		"count":  json.Number("0"),
+		"label":  "default",
+		"tags":   []any{"default"},
+		"secret": "default",
+		"ref":    &Container{},
+		"added":  true,
+	}
+	merged, warnings, err := overlayModuleObjectState(initial, previous, target, source)
+	require.NoError(t, err)
+	require.Empty(t, warnings)
+	require.Equal(t, json.Number("3"), merged["count"])
+	require.Nil(t, merged["label"], "an explicit null wins over the new default")
+	require.Empty(t, merged["tags"], "an empty collection wins over the new default")
+	require.Equal(t, "saved", merged["secret"], "private fields carry over")
+	require.Same(t, ref, merged["ref"])
+	require.Equal(t, true, merged["added"], "new fields take the new default")
+	merged["secret"] = "changed"
+	require.Equal(t, "saved", previous["secret"])
+	require.Equal(t, "default", initial["secret"])
+}
+
+func TestModuleObjectStateOverlayPublicTypeChange(t *testing.T) {
+	dag := newTypeDefTestDag(t)
+	for _, tc := range []struct {
+		name     string
+		old, new *TypeDef
+		value    any
 	}{
-		{"removed private field", map[string]string{"hidden": "String!"}, map[string]string{}, map[string]any{"hidden": "saved"}, "was removed"},
-		{"null type change", map[string]string{"hidden": "String?"}, map[string]string{"hidden": "Int?"}, map[string]any{"hidden": nil}, "changed type"},
-		{"empty collection type change", map[string]string{"hidden": "[String!]!"}, map[string]string{"hidden": "[Int!]!"}, map[string]any{"hidden": []any{}}, "changed type"},
-		{"unknown private field", map[string]string{}, map[string]string{}, map[string]any{"hidden": "saved"}, "no validated state schema"},
-		{"unknown schema", map[string]string{"hidden": ""}, map[string]string{"hidden": ""}, map[string]any{"hidden": nil}, "changed type"},
+		{"scalar kind", &TypeDef{Kind: TypeDefKindInteger}, &TypeDef{Kind: TypeDefKindString}, json.Number("1")},
+		{"nullability with a null value", &TypeDef{Kind: TypeDefKindString, Optional: true}, &TypeDef{Kind: TypeDefKindString}, nil},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := mergeModuleObjectState(nil, test.state, test.target, test.old)
-			require.ErrorContains(t, err, test.want)
+		t.Run(tc.name, func(t *testing.T) {
+			source := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{"f": tc.old})
+			target := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{"f": tc.new})
+			_, _, err := overlayModuleObjectState(map[string]any{"f": "x"}, map[string]any{"f": tc.value}, target, source)
+			require.ErrorContains(t, err, `field "f" changed type`)
+			require.ErrorContains(t, err, StateVersionFieldName)
+		})
+	}
+
+	t.Run("list element type with an empty value", func(t *testing.T) {
+		strList := (&TypeDef{}).WithListOf(newTypeDefDetachedResult(t, dag, "strList", &ListTypeDef{
+			ElementTypeDef: newTypeDefDetachedResult(t, dag, "strElem", &TypeDef{Kind: TypeDefKindString}),
+		}))
+		intList := (&TypeDef{}).WithListOf(newTypeDefDetachedResult(t, dag, "intList", &ListTypeDef{
+			ElementTypeDef: newTypeDefDetachedResult(t, dag, "intElem", &TypeDef{Kind: TypeDefKindInteger}),
+		}))
+		source := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{"items": strList})
+		target := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{"items": intList})
+		_, _, err := overlayModuleObjectState(map[string]any{"items": []any{}}, map[string]any{"items": []any{}}, target, source)
+		require.ErrorContains(t, err, "[String!]! -> [Int!]!")
+	})
+}
+
+func TestModuleObjectStateOverlayKindMismatch(t *testing.T) {
+	dag := newTypeDefTestDag(t)
+	empty := stateTestObjectDef(t, dag, "Obj", nil)
+	for _, tc := range []struct {
+		name     string
+		previous any
+		initial  any
+		want     string
+	}{
+		{"string vs number", "5", json.Number("0"), "previous value is a string but the new revision's default is a number"},
+		{"bool vs string", true, "", "previous value is a boolean but the new revision's default is a string"},
+		{"list vs object", []any{"a"}, map[string]any{}, "previous value is a list but the new revision's default is a object"},
+		{"nested object field", map[string]any{"n": json.Number("1")}, map[string]any{"n": "one"}, `field "f.n"`},
+		{"list element", []any{json.Number("1")}, []any{"one"}, `field "f[]"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := overlayModuleObjectState(map[string]any{"f": tc.initial}, map[string]any{"f": tc.previous}, empty, empty)
+			require.ErrorContains(t, err, tc.want)
 		})
 	}
 }
 
-type stateRebindTestSDK struct {
-	SDK
-	ModuleRuntime
-	schema      map[string]string
-	schemaCalls int
+func TestModuleObjectStateOverlayKindCompatibility(t *testing.T) {
+	dag := newTypeDefTestDag(t)
+	empty := stateTestObjectDef(t, dag, "Obj", nil)
+	for _, tc := range []struct {
+		name     string
+		previous any
+		initial  any
+	}{
+		{"null previous carries no shape", nil, json.Number("1")},
+		{"null default carries no shape", "x", nil},
+		{"engine reference vs SDK id string", &Container{}, "some-id"},
+		{"id string vs engine reference", "some-id", &Container{}},
+		{"int literal vs float literal", json.Number("1"), json.Number("1.5")},
+		{"empty list vs typed list", []any{}, []any{"x"}},
+		{"nested object with disjoint keys", map[string]any{"a": 1}, map[string]any{"b": "x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged, _, err := overlayModuleObjectState(map[string]any{"f": tc.initial}, map[string]any{"f": tc.previous}, empty, empty)
+			require.NoError(t, err)
+			require.Equal(t, tc.previous, merged["f"])
+		})
+	}
 }
 
-func (sdk *stateRebindTestSDK) AsRuntime() (Runtime, bool) { return sdk, true }
-func (sdk *stateRebindTestSDK) Runtime(context.Context, *SchemaBuilder, dagql.ObjectResult[*ModuleSource]) (ModuleRuntime, error) {
-	return sdk, nil
+func TestModuleObjectStateOverlayUnknownKeys(t *testing.T) {
+	dag := newTypeDefTestDag(t)
+	empty := stateTestObjectDef(t, dag, "Obj", nil)
+
+	t.Run("removed public field is dropped", func(t *testing.T) {
+		source := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{"gone": {Kind: TypeDefKindString}})
+		merged, warnings, err := overlayModuleObjectState(map[string]any{"kept": "d"}, map[string]any{"gone": "x", "kept": "v"}, empty, source)
+		require.NoError(t, err)
+		require.NotContains(t, merged, "gone")
+		require.Equal(t, "v", merged["kept"])
+		require.Len(t, warnings, 1)
+		require.Equal(t, "gone", warnings[0].Field)
+		require.Contains(t, warnings[0].Reason, "dropped")
+	})
+
+	t.Run("public field turned private keeps its value", func(t *testing.T) {
+		source := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{"hidden": {Kind: TypeDefKindString}})
+		merged, warnings, err := overlayModuleObjectState(map[string]any{"hidden": "d"}, map[string]any{"hidden": "v"}, empty, source)
+		require.NoError(t, err)
+		require.Empty(t, warnings)
+		require.Equal(t, "v", merged["hidden"])
+	})
+
+	t.Run("unknown private key passes through with a warning", func(t *testing.T) {
+		merged, warnings, err := overlayModuleObjectState(map[string]any{"total": json.Number("0")}, map[string]any{"count": json.Number("7")}, empty, empty)
+		require.NoError(t, err)
+		require.Equal(t, json.Number("7"), merged["count"], "the SDK decoder decides what to do with it")
+		require.Equal(t, json.Number("0"), merged["total"], "the renamed field takes the new default")
+		require.Len(t, warnings, 1)
+		require.Equal(t, "count", warnings[0].Field)
+	})
 }
-func (sdk *stateRebindTestSDK) ObjectStateSchema(context.Context, dagql.ObjectResult[*Module], string) (map[string]string, error) {
-	sdk.schemaCalls++
-	return sdk.schema, nil
-}
-func (sdk *stateRebindTestSDK) CloneForModuleSource(*ModuleSource) SDK { return sdk }
-func (sdk *stateRebindTestSDK) AttachDependencyResults(context.Context, func(dagql.AnyResult) (dagql.AnyResult, error)) ([]dagql.AnyResult, error) {
-	return nil, nil
+
+func TestModuleObjectStateVersion(t *testing.T) {
+	dag := newTypeDefTestDag(t)
+	versioned := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{StateVersionFieldName: {Kind: TypeDefKindInteger}})
+	unversioned := stateTestObjectDef(t, dag, "Obj", nil)
+	object := func(def *ObjectTypeDef, fields map[string]any) *ModuleObject {
+		return &ModuleObject{TypeDef: def, Fields: fields}
+	}
+
+	for _, tc := range []struct {
+		name string
+		obj  *ModuleObject
+		want int
+	}{
+		{"undeclared", object(unversioned, map[string]any{StateVersionFieldName: json.Number("9")}), 0},
+		{"declared but unset", object(versioned, map[string]any{}), 0},
+		{"declared null", object(versioned, map[string]any{StateVersionFieldName: nil}), 0},
+		{"json number", object(versioned, map[string]any{StateVersionFieldName: json.Number("2")}), 2},
+		{"go int", object(versioned, map[string]any{StateVersionFieldName: 3}), 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := moduleObjectStateVersion(tc.obj)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+
+	t.Run("wrong type is rejected", func(t *testing.T) {
+		wrong := stateTestObjectDef(t, dag, "Obj", map[string]*TypeDef{StateVersionFieldName: {Kind: TypeDefKindString}})
+		_, err := moduleObjectStateVersion(object(wrong, map[string]any{StateVersionFieldName: "2"}))
+		require.ErrorContains(t, err, "must be an Int")
+		field, ok := wrong.FieldByName(StateVersionFieldName)
+		require.True(t, ok)
+		require.ErrorContains(t, validateStateVersionField(wrong, field), "must be an Int")
+	})
+
+	ctx := t.Context()
+	t.Run("same version carries state over", func(t *testing.T) {
+		old := object(versioned, map[string]any{StateVersionFieldName: json.Number("1"), "count": json.Number("5"), "hidden": "saved"})
+		target := object(versioned, map[string]any{StateVersionFieldName: json.Number("1"), "count": json.Number("0"), "hidden": "default", "added": "new"})
+		fields, err := rebindModuleObjectFields(ctx, target, old)
+		require.NoError(t, err)
+		require.Equal(t, json.Number("5"), fields["count"])
+		require.Equal(t, "saved", fields["hidden"])
+		require.Equal(t, "new", fields["added"])
+		require.Equal(t, json.Number("1"), fields[StateVersionFieldName])
+	})
+
+	t.Run("first declaration is a bump", func(t *testing.T) {
+		old := object(unversioned, map[string]any{"count": json.Number("5"), "hidden": "saved"})
+		target := object(versioned, map[string]any{StateVersionFieldName: json.Number("1"), "count": json.Number("0"), "hidden": "default"})
+		fields, err := rebindModuleObjectFields(ctx, target, old)
+		require.NoError(t, err)
+		require.Equal(t, json.Number("0"), fields["count"], "state resets to the new defaults")
+		require.Equal(t, "default", fields["hidden"])
+		require.Equal(t, json.Number("1"), fields[StateVersionFieldName])
+		fields["count"] = json.Number("9")
+		require.Equal(t, json.Number("0"), target.Fields["count"], "the reset state is a copy of the defaults")
+	})
+
+	t.Run("bump resets even incompatible state", func(t *testing.T) {
+		old := object(versioned, map[string]any{StateVersionFieldName: json.Number("1"), "count": "five"})
+		target := object(versioned, map[string]any{StateVersionFieldName: json.Number("2"), "count": json.Number("0")})
+		fields, err := rebindModuleObjectFields(ctx, target, old)
+		require.NoError(t, err)
+		require.Equal(t, json.Number("0"), fields["count"])
+	})
+
+	t.Run("same version still rejects visible incompatibilities", func(t *testing.T) {
+		old := object(versioned, map[string]any{StateVersionFieldName: json.Number("1"), "count": "five"})
+		target := object(versioned, map[string]any{StateVersionFieldName: json.Number("1"), "count": json.Number("0")})
+		_, err := rebindModuleObjectFields(ctx, target, old)
+		require.ErrorContains(t, err, `Obj: field "count"`)
+	})
 }
 
 func TestModuleObjectStateRebindIdentity(t *testing.T) {
@@ -127,12 +308,8 @@ func TestModuleObjectStateRebindIdentity(t *testing.T) {
 	installTypeDefTestClasses(dag)
 
 	makeObject := func(revision string, fields map[string]any) dagql.ObjectResult[*ModuleObject] {
-		schema := make(map[string]string, len(fields))
-		for name := range fields {
-			schema[name] = "String?"
-		}
 		source := newTypeDefAttachedResult(t, ctx, cache, dag, "source-"+revision, &ModuleSource{
-			Kind: ModuleSourceKindDir, SDKImpl: &stateRebindTestSDK{schema: schema},
+			Kind: ModuleSourceKindDir,
 		})
 		typeDef := NewObjectTypeDef("Test", "", nil)
 		objDef := newTypeDefAttachedResult(t, ctx, cache, dag, "object-def-"+revision, typeDef)
@@ -152,7 +329,7 @@ func TestModuleObjectStateRebindIdentity(t *testing.T) {
 		return newTypeDefAttachedResult(t, ctx, cache, dag, "receiver-"+revision, obj)
 	}
 	previous := makeObject("old", map[string]any{"hidden": "saved", "null": nil})
-	// Each revision has its own schema, even when both expose the same names.
+	// Each revision has its own class, even when both expose the same names.
 	dag = newCoreDagqlServerForTest(t, root)
 	server.dag = dag
 	installModuleObjectTestModuleClass(dag)
@@ -202,19 +379,12 @@ func TestModuleObjectStateRebindIdentity(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "saved", loadedObj.Fields["hidden"])
 
-	// No code change requires no private-schema validation and retains identity.
-	sdk := initial.Self().Module.Self().Source.Value.Self().SDKImpl.(*stateRebindTestSDK)
-	calls := sdk.schemaCalls
+	// No code change retains identity without a rebind selection.
 	unchanged, err := RebindModuleObjectState(ctx, dag, initial, result)
 	require.NoError(t, err)
-	require.Equal(t, calls, sdk.schemaCalls)
 	unchangedID, err := unchanged.ID()
 	require.NoError(t, err)
 	require.Equal(t, newID.EngineResultID(), unchangedID.EngineResultID())
-
-	unsupported := newTypeDefDetachedResult(t, dag, "unsupported-sdk", &Module{})
-	_, err = moduleObjectStateSchema(ctx, &ModuleObject{Module: unsupported, TypeDef: initial.Self().TypeDef})
-	require.ErrorContains(t, err, "SDK does not support complete receiver-state validation")
 
 	_, _, err = moduleObjectsForRebind(nil, previous)
 	require.ErrorContains(t, err, "requires both target and previous receivers")

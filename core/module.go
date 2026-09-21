@@ -1357,6 +1357,9 @@ func (mod *Module) validateObjectField(ctx context.Context, obj *ObjectTypeDef, 
 	if gqlFieldName(field.Name) == "id" {
 		return fmt.Errorf("cannot define field with reserved name %q on object %q", field.Name, obj.Name)
 	}
+	if err := validateStateVersionField(obj, field); err != nil {
+		return err
+	}
 	// Workspace cannot be stored as a field on a module object
 	if field.TypeDef.Self().Kind == TypeDefKindObject && field.TypeDef.Self().AsObject.Value.Self().Name == "Workspace" {
 		return fmt.Errorf("object %q field %q: Workspace cannot be stored as a field on a module object; declare it as a function argument instead",

@@ -1575,11 +1575,14 @@ class AgentMiddlewareGroup(Type):
         compose semantics; this is not a general rollback of arbitrary
         middleware changes.
 
-        Existing field values win over new defaults. Incompatible state,
-        discarded bindings, or a changed module origin is an error. Cross-
-        revision state validation currently requires the Dang v2 runtime;
-        unchanged module revisions work with any SDK. The base workspace is
-        preserved.
+        Existing field values win over new defaults; fields added by the new
+        revision take its defaults. An object may declare a public
+        `stateVersion: Int` field with a constant default: recomposing onto a
+        revision whose version differs resets that object's state to the new
+        defaults instead. Visibly incompatible state (a public field that
+        changed type, or a value whose shape differs from the new default),
+        discarded bindings, or a changed module origin is an error. The base
+        workspace is preserved.
 
         .. caution::
             Experimental: Agent APIs are likely to change.

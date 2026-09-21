@@ -2,28 +2,29 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 
 	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/dagql/call"
+	"github.com/dagger/dagger/engine/slog"
 )
 
 const rebindModuleObjectStateField = "__rebindState"
 
-// ModuleObjectStateSchema is an optional runtime capability for preserving state
-// across code revisions. Unlike the public GraphQL schema, this must describe
-// ALL serialized fields, including private fields. Signatures must be stable
-// across code revisions and include nullability, collection element types and
-// the complete nested serialized shape. Methods are not part of that shape.
-// Runtimes must fail rather than return an incomplete or unknown schema.
-//
-// SDKs without this capability (including container SDKs) cannot currently
-// rebind state across revisions. They can still reuse an unchanged revision.
-type ModuleObjectStateSchema interface {
-	ObjectStateSchema(context.Context, dagql.ObjectResult[*Module], string) (map[string]string, error)
-}
+// StateVersionFieldName is the reserved public field through which an object
+// versions the layout of its serialized state. It is the only coordination
+// asked of a module author: declare `stateVersion: Int` with a constant default
+// and bump it when the state layout changes incompatibly. Recomposing onto a
+// revision with a different version resets the object to the new revision's
+// defaults instead of carrying old state over; an unchanged (or undeclared)
+// version carries state over field by field. The value is ordinary serialized
+// state, so both revisions' versions are already in hand when rebinding: no
+// runtime, SDK, or config involvement is needed.
+const StateVersionFieldName = "stateVersion"
 
 // RebindModuleObjectState selects an engine-owned, replayable operation on the
 // target revision's initial object. The previous receiver is an ID argument, not
@@ -154,15 +155,7 @@ func (obj *ModuleObject) stateRebindField(ctx context.Context, srv *dagql.Server
 			if !sameClass {
 				return nil, fmt.Errorf("target receiver class belongs to a different module revision")
 			}
-			oldSchema, err := moduleObjectStateSchema(ctx, old)
-			if err != nil {
-				return nil, fmt.Errorf("previous receiver schema: %w", err)
-			}
-			newSchema, err := moduleObjectStateSchema(ctx, target)
-			if err != nil {
-				return nil, fmt.Errorf("target receiver schema: %w", err)
-			}
-			fields, err := mergeModuleObjectState(target.Fields, old.Fields, newSchema, oldSchema)
+			fields, err := rebindModuleObjectFields(ctx, target, old)
 			if err != nil {
 				return nil, err
 			}
@@ -173,42 +166,248 @@ func (obj *ModuleObject) stateRebindField(ctx context.Context, srv *dagql.Server
 	}, nil
 }
 
-func moduleObjectStateSchema(ctx context.Context, obj *ModuleObject) (map[string]string, error) {
-	mod := obj.Module.Self()
-	if mod.Runtime.Valid || !mod.Source.Valid || mod.Source.Value.Self().SDKImpl == nil {
-		return nil, fmt.Errorf("SDK does not support complete receiver-state validation")
-	}
-	runtime, err := mod.LoadRuntime(ctx)
+// rebindModuleObjectFields computes the state of the target revision's object
+// given the previous revision's receiver. A state version bump resets to the
+// target's constructed defaults; otherwise the previous state is overlaid onto
+// them (see overlayModuleObjectState).
+func rebindModuleObjectFields(ctx context.Context, target, old *ModuleObject) (map[string]any, error) {
+	typeName := target.TypeDef.OriginalName
+	oldVersion, err := moduleObjectStateVersion(old)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("previous receiver: %w", err)
 	}
-	validator, ok := runtime.(ModuleObjectStateSchema)
-	if !ok {
-		return nil, fmt.Errorf("SDK does not support complete receiver-state validation")
+	newVersion, err := moduleObjectStateVersion(target)
+	if err != nil {
+		return nil, fmt.Errorf("target receiver: %w", err)
 	}
-	return validator.ObjectStateSchema(ctx, obj.Module, obj.TypeDef.OriginalName)
+	logger := slog.SpanLogger(ctx, InstrumentationLibrary)
+	if oldVersion != newVersion {
+		logger.Warn("resetting tool state: its state version changed",
+			"object", typeName,
+			"previousVersion", oldVersion,
+			"currentVersion", newVersion)
+		fields := maps.Clone(target.Fields)
+		if fields == nil {
+			fields = make(map[string]any)
+		}
+		return fields, nil
+	}
+	fields, warnings, err := overlayModuleObjectState(target.Fields, old.Fields, target.TypeDef, old.TypeDef)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", typeName, err)
+	}
+	for _, warning := range warnings {
+		logger.Warn("carried tool state across revisions with a caveat",
+			"object", typeName,
+			"field", warning.Field,
+			"reason", warning.Reason)
+	}
+	return fields, nil
 }
 
-func mergeModuleObjectState(initial, previous map[string]any, targetSchema, previousSchema map[string]string) (map[string]any, error) {
-	for _, name := range slices.Sorted(maps.Keys(previousSchema)) {
-		oldType := previousSchema[name]
-		newType, exists := targetSchema[name]
-		if !exists {
-			return nil, fmt.Errorf("receiver field %q was removed", name)
-		}
-		if oldType == "" || oldType != newType {
-			return nil, fmt.Errorf("receiver field %q changed type (%s -> %s)", name, oldType, newType)
-		}
+// validateStateVersionField enforces the shape of the reserved state version
+// field at module load, so an author who declares it under the wrong type finds
+// out immediately rather than when recomposition silently ignores it.
+func validateStateVersionField(obj *ObjectTypeDef, field *FieldTypeDef) error {
+	if field.Name != StateVersionFieldName {
+		return nil
 	}
-	for _, name := range slices.Sorted(maps.Keys(previous)) {
-		if _, exists := previousSchema[name]; !exists {
-			return nil, fmt.Errorf("previous receiver field %q has no validated state schema", name)
-		}
+	typeDef := field.TypeDef.Self()
+	if typeDef == nil || typeDef.Kind != TypeDefKindInteger {
+		return fmt.Errorf("object %q field %q is reserved for the object's state version and must be an Int",
+			obj.OriginalName, field.OriginalName)
 	}
+	return nil
+}
+
+// moduleObjectStateVersion reads an object's declared state version from its
+// serialized state. An object that does not declare the field, or whose state
+// lacks a value for it, is at version 0.
+func moduleObjectStateVersion(obj *ModuleObject) (int, error) {
+	field, ok := obj.TypeDef.FieldByName(StateVersionFieldName)
+	if !ok {
+		return 0, nil
+	}
+	if err := validateStateVersionField(obj.TypeDef, field); err != nil {
+		return 0, err
+	}
+	value, ok := obj.Fields[field.OriginalName]
+	if !ok || value == nil {
+		return 0, nil
+	}
+	switch v := value.(type) {
+	case json.Number:
+		n, err := strconv.ParseInt(v.String(), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("field %q: %w", field.OriginalName, err)
+		}
+		return int(n), nil
+	case float64:
+		return int(v), nil
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	case dagql.Int:
+		return int(v), nil
+	default:
+		return 0, fmt.Errorf("field %q: unexpected state version value %T", field.OriginalName, value)
+	}
+}
+
+// stateOverlayWarning is a non-fatal observation about a carried-over field.
+type stateOverlayWarning struct {
+	Field  string
+	Reason string
+}
+
+// overlayModuleObjectState returns previous overlaid onto initial: existing
+// values win, including nulls and empty collections; keys only initial has
+// take the new revision's defaults.
+//
+// The engine cannot see private fields in the GraphQL typedef, but it holds
+// three things at rebind time: the previous receiver's serialized state (every
+// key, private included), the new revision's constructor output (its defaults,
+// private included, since SDKs serialize whole objects), and both revisions'
+// public typedefs. Those support exactly the checks made here: a public field
+// whose type changed between typedefs fails, as does a value whose JSON kind
+// differs from the new revision's default for the same key. A public field the
+// new revision no longer has at all is dropped, since the old typedef proves
+// it was removed on purpose. Keys neither typedef nor the constructor knows are
+// passed through with a warning: they are private fields the new constructor
+// left unset, or renamed/removed private fields, and only the SDK's own
+// parent-state decoder can tell — it runs on the next tool call and remains
+// the authority on what its objects accept.
+func overlayModuleObjectState(initial, previous map[string]any, target, source *ObjectTypeDef) (map[string]any, []stateOverlayWarning, error) {
+	targetTypes := publicFieldTypes(target)
+	sourceTypes := publicFieldTypes(source)
+
+	var warnings []stateOverlayWarning
 	fields := maps.Clone(initial)
 	if fields == nil {
 		fields = make(map[string]any)
 	}
-	maps.Copy(fields, previous)
-	return fields, nil
+	for _, name := range slices.Sorted(maps.Keys(previous)) {
+		value := previous[name]
+		oldType, wasPublic := sourceTypes[name]
+		newType, isPublic := targetTypes[name]
+		initialValue, hasDefault := initial[name]
+
+		switch {
+		case wasPublic && isPublic && oldType != newType:
+			return nil, nil, fmt.Errorf("field %q changed type (%s -> %s); bump %s to reset its state", name, oldType, newType, StateVersionFieldName)
+		case wasPublic && !isPublic && !hasDefault:
+			warnings = append(warnings, stateOverlayWarning{name, "dropped: the field no longer exists in the new revision"})
+			continue
+		case !wasPublic && !isPublic && !hasDefault:
+			warnings = append(warnings, stateOverlayWarning{name, "not emitted by the new revision's constructor; its SDK decoder decides what to do with it"})
+		}
+
+		if hasDefault {
+			if err := checkStateKind(name, value, initialValue); err != nil {
+				return nil, nil, err
+			}
+		}
+		fields[name] = value
+	}
+	return fields, warnings, nil
+}
+
+// publicFieldTypes maps each public field's original (SDK-side) name to its
+// GraphQL type signature, e.g. "[String!]!". Nullability and list element
+// types are part of the signature.
+func publicFieldTypes(def *ObjectTypeDef) map[string]string {
+	types := make(map[string]string)
+	if def == nil {
+		return types
+	}
+	for _, field := range def.Fields {
+		f := field.Self()
+		if f == nil || f.TypeDef.Self() == nil {
+			continue
+		}
+		types[f.OriginalName] = f.TypeDef.Self().ToType().String()
+	}
+	return types
+}
+
+// stateKind is the JSON-level shape of a serialized field value. It is the
+// most the engine can know about a private field.
+type stateKind string
+
+const (
+	stateKindNull      stateKind = "null"
+	stateKindBoolean   stateKind = "boolean"
+	stateKindNumber    stateKind = "number"
+	stateKindString    stateKind = "string"
+	stateKindList      stateKind = "list"
+	stateKindObject    stateKind = "object"
+	stateKindReference stateKind = "reference"
+	stateKindUnknown   stateKind = "unknown"
+)
+
+func kindOfState(value any) stateKind {
+	switch value.(type) {
+	case nil:
+		return stateKindNull
+	case bool:
+		return stateKindBoolean
+	case string:
+		return stateKindString
+	case json.Number, float32, float64, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return stateKindNumber
+	case []any:
+		return stateKindList
+	case map[string]any:
+		return stateKindObject
+	case dagql.AnyResult, dagql.IDable, dagql.Typed, *call.ID, call.ID:
+		// Engine-side objects and handles; the SDK sees them as ID strings.
+		return stateKindReference
+	default:
+		return stateKindUnknown
+	}
+}
+
+// compatibleStateKinds reports whether a carried-over value of kind previous
+// can stand in for a default of kind initial. Nulls carry no shape and are
+// always compatible; references travel as ID strings.
+func compatibleStateKinds(previous, initial stateKind) bool {
+	if previous == initial || previous == stateKindNull || initial == stateKindNull || previous == stateKindUnknown || initial == stateKindUnknown {
+		return true
+	}
+	isStringy := func(k stateKind) bool { return k == stateKindString || k == stateKindReference }
+	return isStringy(previous) && isStringy(initial)
+}
+
+// checkStateKind compares the shapes of a previous value and the new default
+// for the same key, recursing into nested objects (common keys only) and the
+// first element of non-empty lists.
+func checkStateKind(path string, previous, initial any) error {
+	oldKind, newKind := kindOfState(previous), kindOfState(initial)
+	if !compatibleStateKinds(oldKind, newKind) {
+		return fmt.Errorf("field %q: previous value is a %s but the new revision's default is a %s; bump %s to reset its state", path, oldKind, newKind, StateVersionFieldName)
+	}
+	switch oldKind {
+	case stateKindObject:
+		oldObj, ok1 := previous.(map[string]any)
+		newObj, ok2 := initial.(map[string]any)
+		if !ok1 || !ok2 {
+			return nil
+		}
+		for _, k := range slices.Sorted(maps.Keys(oldObj)) {
+			if _, shared := newObj[k]; !shared {
+				continue
+			}
+			if err := checkStateKind(path+"."+k, oldObj[k], newObj[k]); err != nil {
+				return err
+			}
+		}
+	case stateKindList:
+		oldList, ok1 := previous.([]any)
+		newList, ok2 := initial.([]any)
+		if ok1 && ok2 && len(oldList) > 0 && len(newList) > 0 {
+			return checkStateKind(path+"[]", oldList[0], newList[0])
+		}
+	}
+	return nil
 }
