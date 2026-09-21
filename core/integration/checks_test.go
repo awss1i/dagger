@@ -183,8 +183,8 @@ func (ChecksSuite) TestChecksGenerateAsCheck(ctx context.Context, t *testctx.T) 
 		require.Regexp(t, `passing-check\s+# A regular passing check`, out)
 		// A generate-derived check is listed under an up-to-date leaf, so its name
 		// cannot be mistaken for the generator `dagger generate -l` lists.
-		require.Regexp(t, `(?m)^dag://empty-generate/stale\s+# `, out)
-		require.Regexp(t, `(?m)^dag://non-empty-generate/stale\s+# `, out)
+		require.Regexp(t, `(?m)^empty-generate/stale\s+# `, out)
+		require.Regexp(t, `(?m)^non-empty-generate/stale\s+# `, out)
 		require.NotContains(t, out, "Generators")
 	})
 
@@ -206,8 +206,8 @@ func (ChecksSuite) TestChecksGenerateAsCheck(ctx context.Context, t *testctx.T) 
 			CombinedOutput(ctx)
 		require.NoError(t, err)
 		// Should only list generators (rendered with `# Did you "..."?` comments), no regular checks
-		require.Regexp(t, `(?m)^dag://empty-generate/stale\s+# `, out)
-		require.Regexp(t, `(?m)^dag://non-empty-generate/stale\s+# `, out)
+		require.Regexp(t, `(?m)^empty-generate/stale --generate=true\s+# `, out)
+		require.Regexp(t, `(?m)^non-empty-generate/stale --generate=true\s+# `, out)
 		require.NotContains(t, out, "passing-check")
 	})
 
@@ -265,7 +265,7 @@ func (ChecksSuite) TestChecksGenerateAsCheck(ctx context.Context, t *testctx.T) 
 			With(daggerExec("check", "-l", "empty-*")).
 			CombinedOutput(ctx)
 		require.NoError(t, err)
-		require.Regexp(t, `(?m)^dag://empty-generate/stale\s+# `, out)
+		require.Regexp(t, `(?m)^empty-generate/stale\s+# `, out)
 		require.NotContains(t, out, "passing-check")
 	})
 
@@ -420,8 +420,8 @@ source = "hello-with-generate-checks"
 	t.Run("--generate flag overrides the config", func(ctx context.Context, t *testctx.T) {
 		out, err := base.With(daggerExec("check", "-l", "--generate")).CombinedOutput(ctx)
 		require.NoError(t, err, out)
-		require.Regexp(t, `(?m)^dag://hello-with-generate-checks/empty-generate/stale\s+# A check`, out)
-		require.Regexp(t, `(?m)^dag://hello-with-generate-checks/non-empty-generate/stale\s+# A check`, out)
+		require.Regexp(t, `(?m)^hello-with-generate-checks/empty-generate/stale --generate=true\s+# A check`, out)
+		require.Regexp(t, `(?m)^hello-with-generate-checks/non-empty-generate/stale --generate=true\s+# A check`, out)
 		require.NotContains(t, out, "passing-check")
 	})
 
@@ -597,10 +597,10 @@ source = "../%s"
 				With(daggerExec("check", "-l")).
 				CombinedOutput(ctx)
 			require.NoError(t, err)
-			require.Contains(t, out, "dag://"+tc.path+"/passing-check")
-			require.Contains(t, out, "dag://"+tc.path+"/failing-check")
-			require.Contains(t, out, "dag://"+tc.path+"/test/lint")
-			require.Contains(t, out, "dag://"+tc.path+"/test/unit")
+			require.Contains(t, out, tc.path+"/passing-check")
+			require.Contains(t, out, tc.path+"/failing-check")
+			require.Contains(t, out, tc.path+"/test/lint")
+			require.Contains(t, out, tc.path+"/test/unit")
 			// run a specific passing check
 			_, err = modGen.
 				With(daggerExec("--progress=report", "check", tc.path+":passing-check")).
@@ -698,7 +698,7 @@ name = "beta"
 			CombinedOutput(ctx)
 		require.NoError(t, err, out)
 		// The generated Changeset exposes its stale check at a child address.
-		require.Regexp(t, `(?m)^dag://alpha-sdk/generate/stale\s+# A check`, out)
+		require.Regexp(t, `(?m)^alpha-sdk/generate/stale\s+# A check`, out)
 	})
 
 	t.Run("the generator keeps the un-suffixed name", func(ctx context.Context, t *testctx.T) {
@@ -707,7 +707,7 @@ name = "beta"
 			With(daggerNonNestedExec("generate", "-l")).
 			CombinedOutput(ctx)
 		require.NoError(t, err, out)
-		require.Regexp(t, `(?m)^dag://alpha-sdk/generate\s+#`, out)
+		require.Regexp(t, `(?m)^alpha-sdk/generate\s+#`, out)
 		require.NotContains(t, out, "/stale")
 	})
 
@@ -764,7 +764,7 @@ entrypoint = true`, 1)
 			With(daggerNonNestedExec("check", "-l")).
 			CombinedOutput(ctx)
 		require.NoError(t, err, out)
-		require.Regexp(t, `(?m)^dag://generate/stale\s+# A check`, out)
+		require.Regexp(t, `(?m)^generate/stale\s+# A check`, out)
 		require.NotContains(t, out, "alpha-sdk/generate")
 	})
 
@@ -784,7 +784,7 @@ entrypoint = true`, 1)
 			With(daggerNonNestedExec("check", "-l", "alpha-sdk/generate/stale")).
 			CombinedOutput(ctx)
 		require.NoError(t, err, out)
-		require.Regexp(t, `(?m)^dag://alpha-sdk/generate/stale\s+# A check`, out)
+		require.Regexp(t, `(?m)^alpha-sdk/generate/stale\s+# A check`, out)
 		require.NotContains(t, out, "beta-sdk")
 
 		out, err = base.

@@ -327,8 +327,8 @@ func (GeneratorsSuite) TestGeneratorsInstalledInWorkspace(ctx context.Context, t
 					With(daggerExec("generate", "-l")).
 					CombinedOutput(ctx)
 				require.NoError(t, err)
-				require.Contains(t, out, "dag://"+tc.path+"/generate-files")
-				require.Contains(t, out, "dag://"+tc.path+"/generate-other-files")
+				require.Contains(t, out, tc.path+"/generate-files")
+				require.Contains(t, out, tc.path+"/generate-other-files")
 			})
 
 			t.Run("generate", func(ctx context.Context, t *testctx.T) {

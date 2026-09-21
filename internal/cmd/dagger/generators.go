@@ -28,7 +28,7 @@ var (
 )
 
 func init() {
-	registerArtifactListFlags(generateCmd)
+	registerCommandArtifactFlags(generateCmd)
 	generateCmd.Flags().BoolVarP(&generateListMode, "list", "l", false, "List available generators")
 	generateCmd.Flags().BoolVar(&generateRequireLoad, "require-load", false, "Fail if any workspace module cannot be loaded (default: report as a warning and generate the rest)")
 	generateCmd.Flags().BoolVar(&generateNoApply, "no-apply", false, "Compute and show a summary of generated changes without applying them")
@@ -69,7 +69,7 @@ Examples:
 				slog.SetDefault(slog.SpanLogger(ctx, InstrumentationLibrary))
 				dag := engineClient.Dagger()
 				ws := dag.CurrentWorkspace()
-				all, err := commandArtifacts(ctx, dag, ws, args, generateRequireLoad)
+				all, err := commandArtifactsWithFlags(ctx, dag, ws, cmd, args, generateRequireLoad)
 				if err != nil {
 					return err
 				}

@@ -189,7 +189,7 @@ func (ArtifactsSuite) TestAbsoluteURI(ctx context.Context, t *testctx.T) {
 	require.Equal(t, "dag://base\n", out)
 	out, err = base.With(workspaceSelectionDaggerExec("check", "-l", "dag://"+ref+":verify")).Stdout(ctx)
 	require.NoError(t, err)
-	require.Equal(t, "dag://verify\n", out)
+	require.Equal(t, "verify\n", out)
 	_, err = base.With(workspaceSelectionDaggerExec("check", "dag://"+ref+":verify")).Sync(ctx)
 	require.NoError(t, err)
 
@@ -213,7 +213,11 @@ func (ArtifactsSuite) TestAbsoluteURI(ctx context.Context, t *testctx.T) {
 				require.NoError(t, err)
 				var want []string
 				for _, path := range tc.paths {
-					want = append(want, strings.TrimSuffix(uri, "base")+path)
+					address := strings.TrimSuffix(uri, "base") + path
+					if tc.args[0] != "artifact" && tc.args[0] != "workspace" {
+						address = strings.TrimPrefix(address, "dag://")
+					}
+					want = append(want, address)
 				}
 				require.Equal(t, strings.Join(want, "\n")+"\n", out)
 			})
@@ -1075,8 +1079,8 @@ source = "dang"
 		t.Run(command+" list", func(ctx context.Context, t *testctx.T) {
 			out, err := base.With(daggerNonNestedExec(command, "-l")).Stdout(ctx)
 			require.NoError(t, err)
-			require.Contains(t, out, "dag://clean")
-			require.Contains(t, out, "dag://dirty")
+			require.Contains(t, out, "clean")
+			require.Contains(t, out, "dirty")
 			require.NotContains(t, out, "edit")
 		})
 	}

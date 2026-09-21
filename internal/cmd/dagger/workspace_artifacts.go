@@ -44,7 +44,7 @@ func prepareArtifactCommands(ctx context.Context, root *cobra.Command, args, raw
 		}
 	}
 	cmd, commandArgs := resolveCommand(root, args)
-	if cmd != workspaceCmd && cmd != artifactsCmd && cmd.Parent() != artifactsCmd && cmd != checksCmd {
+	if cmd != workspaceCmd && cmd != artifactsCmd && cmd.Parent() != artifactsCmd && !isArtifactCommand(cmd) {
 		return nil
 	}
 	if cmd != workspaceCmd {
@@ -57,7 +57,7 @@ func prepareArtifactCommands(ctx context.Context, root *cobra.Command, args, raw
 			}
 		}
 		if !discover {
-			if cmd == checksCmd {
+			if isArtifactCommand(cmd) {
 				return nil
 			}
 			return artifactsCmd.RegisterFlagCompletionFunc("type", completeArtifactTypes)
@@ -89,7 +89,7 @@ func prepareArtifactCommands(ctx context.Context, root *cobra.Command, args, raw
 		}); err != nil {
 			return err
 		}
-		if cmd == checksCmd {
+		if isArtifactCommand(cmd) {
 			return nil
 		}
 		return artifactsCmd.RegisterFlagCompletionFunc("type", completeArtifactTypes)

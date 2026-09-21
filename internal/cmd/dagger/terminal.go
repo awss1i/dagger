@@ -16,7 +16,7 @@ import (
 var terminalListMode bool
 
 func init() {
-	registerArtifactListFlags(shellCmd)
+	registerCommandArtifactFlags(shellCmd)
 	shellCmd.Flags().BoolVarP(&terminalListMode, "list", "l", false, "List available shells")
 	shellCmd.Flags().StringP("command", "c", "", "Use 'dagger -c' to run Dagger scripts")
 	legacyCommand := shellCmd.Flags().Lookup("command")
@@ -50,7 +50,11 @@ Examples:
 }
 
 func runTerminalCommand(cmd *cobra.Command, args []string) error {
-	if !terminalListMode && len(args) == 0 {
+	keys, err := artifactKeyFlags(cmd)
+	if err != nil {
+		return err
+	}
+	if !terminalListMode && len(args) == 0 && len(keys) == 0 {
 		_, err := fmt.Fprintln(cmd.OutOrStdout(), `Choose a shell to open.
 
   dagger shell -l       List available shells
@@ -67,7 +71,7 @@ func runTerminalCommand(cmd *cobra.Command, args []string) error {
 		params,
 		func(ctx context.Context, engineClient *client.Client) error {
 			dag := engineClient.Dagger()
-			all, err := commandArtifacts(ctx, dag, dag.CurrentWorkspace(), args, true)
+			all, err := commandArtifactsWithFlags(ctx, dag, dag.CurrentWorkspace(), cmd, args, true)
 			if err != nil {
 				return err
 			}
